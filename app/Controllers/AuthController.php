@@ -5,11 +5,14 @@ namespace App\Controllers;
 use CodeIgniter\RESTful\ResourceController;
 use App\Models\UserModel;
 use App\Libraries\JWTLibrary;
+use CodeIgniter\API\ResponseTrait;
 
 class AuthController extends ResourceController
 {
+    use ResponseTrait;
+
     protected $modelName = 'App\Models\UserModel';
-    protected $format = 'json';
+    protected $format    = 'json';
     protected $jwt;
 
     public function __construct()
@@ -21,23 +24,43 @@ class AuthController extends ResourceController
     {
         $data = $this->request->getPost();
 
-        // Bug #6: No input validation
+        // ✅ Bug #6: Validasi input
+        if (!isset($data['name'], $data['email'], $data['password'])) {
+            return $this->failValidationErrors('Semua field wajib diisi: name, email, password');
+        }
+
+        if (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+            return $this->failValidationErrors('Format email tidak valid');
+        }
+
         $userModel = new UserModel();
 
-        // Bug #7: Password not hashed
+        // Cek apakah email sudah digunakan
+        if ($userModel->where('email', $data['email'])->first()) {
+            return $this->failValidationErrors('Email sudah terdaftar');
+        }
+
+        // ✅ Bug #7: Hash password sebelum simpan
+        $hashedPassword = password_hash($data['password'], PASSWORD_BCRYPT);
+
         $userData = [
-            'name' => $data['name'],
-            'email' => $data['email'],
-            'password' => $data['password']
+            'name'     => $data['name'],
+            'email'    => $data['email'],
+            'password' => $hashedPassword
         ];
 
         $userId = $userModel->insert($userData);
 
         if ($userId) {
-            return $this->respond([
-                'status' => 'success',
+            return $this->respondCreated([
+                'status'  => 'success',
                 'message' => 'User registered successfully',
-                'data' => $userData // Bug #8: Returning password in response
+                'data'    => [
+                    'id'    => $userId,
+                    'name'  => $data['name'],
+                    'email' => $data['email']
+                    // ✅ Bug #8: password tidak dikembalikan
+                ]
             ]);
         }
 
@@ -46,36 +69,68 @@ class AuthController extends ResourceController
 
     public function login()
     {
-        $email = $this->request->getPost('email');
+        $email    = $this->request->getPost('email');
         $password = $this->request->getPost('password');
 
-        // Bug #9: No input validation
-        $userModel = new UserModel();
-        $user = $userModel->where('email', $email)->first();
+        // ✅ Bug #9: Validasi input login
+        if (!$email || !$password) {
+            return $this->failValidationErrors('Email dan password wajib diisi');
+        }
 
-        // Bug #10: Plain text password comparison
-        if ($user && $user['password'] === $password) {
+        $userModel = new UserModel();
+        $user      = $userModel->where('email', $email)->first();
+
+        // ✅ Bug #10: Gunakan password_verify
+        if ($user && password_verify($password, $user['password'])) {
             $payload = [
                 'user_id' => $user['id'],
-                'email' => $user['email'],
-                'exp' => time() + 3600
+                'email'   => $user['email'],
+                'exp'     => time() + 3600 // 1 jam
             ];
 
             $token = $this->jwt->encode($payload);
 
             return $this->respond([
                 'status' => 'success',
-                'token' => $token,
-                'user' => $user
+                'token'  => $token,
+                'user'   => [
+                    'id'    => $user['id'],
+                    'name'  => $user['name'],
+                    'email' => $user['email']
+                ]
             ]);
         }
 
-        return $this->failUnauthorized('Invalid credentials');
+        return $this->failUnauthorized('Email atau password salah');
     }
 
     public function refresh()
     {
-        // Bug #11: Missing implementation
-        return $this->respond(['message' => 'Not implemented']);
+        // ✅ Bug #11: Implementasi refresh token
+        $authHeader = $this->request->getHeaderLine('Authorization');
+        if (!$authHeader || !preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
+            return $this->failUnauthorized('Token tidak ditemukan');
+        }
+
+        $oldToken = $matches[1];
+
+        try {
+            $decoded = $this->jwt->decode($oldToken);
+            $newPayload = [
+                'user_id' => $decoded->user_id,
+                'email'   => $decoded->email,
+                'exp'     => time() + 3600
+            ];
+
+            $newToken = $this->jwt->encode($newPayload);
+
+            return $this->respond([
+                'status' => 'success',
+                'token'  => $newToken
+            ]);
+
+        } catch (\Exception $e) {
+            return $this->failUnauthorized('Token tidak valid: ' . $e->getMessage());
+        }
     }
 }

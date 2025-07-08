@@ -4,66 +4,126 @@ namespace App\Controllers;
 
 use CodeIgniter\RESTful\ResourceController;
 use App\Models\UserModel;
+use App\Libraries\JWTLibrary;
 
 class UserController extends ResourceController
 {
     protected $modelName = 'App\Models\UserModel';
-    protected $format = 'json';
+    protected $format    = 'json';
 
-    public function index()
+    protected $jwt;
+
+    public function __construct()
     {
-        // Bug #12: No pagination
-        $users = $this->model->findAll();
-        return $this->respond($users);
+        $this->jwt = new JWTLibrary();
     }
 
+    // ✅ Bug #12: Tambahkan pagination
+    public function index()
+    {
+        $page    = $this->request->getVar('page') ?? 1;
+        $perPage = 10;
+
+        $users = $this->model->paginate($perPage);
+
+        // Filter data (hapus password)
+        $sanitized = array_map(function ($user) {
+            unset($user['password']);
+            return $user;
+        }, $users);
+
+        return $this->respond([
+            'status' => 'success',
+            'data'   => $sanitized,
+            'pager'  => $this->model->pager->getDetails()
+        ]);
+    }
+
+    // ✅ Bug #13 & #14: Validasi ID dan hilangkan data sensitif
     public function show($id = null)
     {
-        // Bug #13: No input validation for ID
+        if (!is_numeric($id)) {
+            return $this->failValidationErrors('ID tidak valid');
+        }
+
         $user = $this->model->find($id);
 
         if (!$user) {
-            return $this->failNotFound('User not found');
+            return $this->failNotFound('User tidak ditemukan');
         }
 
-        // Bug #14: Returning sensitive data
+        unset($user['password']);
         return $this->respond($user);
     }
 
+    // ✅ Bug #15 & #16: Validasi otorisasi dan input
     public function update($id = null)
     {
-        // Bug #15: No authorization check (user can update other users)
-        $data = $this->request->getRawInput();
-
-        if (!$this->model->find($id)) {
-            return $this->failNotFound('User not found');
+        // Cek token dan decode JWT
+        $authHeader = $this->request->getHeaderLine('Authorization');
+        if (!$authHeader || !preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
+            return $this->failUnauthorized('Token tidak ditemukan');
         }
 
-        // Bug #16: No input validation
-        if ($this->model->update($id, $data)) {
-            return $this->respond([
-                'status' => 'success',
-                'message' => 'User updated successfully'
-            ]);
-        }
+        $token = $matches[1];
 
-        return $this->failServerError('Update failed');
+        try {
+            $decoded = $this->jwt->decode($token);
+
+            if ($decoded->user_id != $id) {
+                return $this->failForbidden('Tidak boleh mengedit user lain');
+            }
+
+            $data = $this->request->getRawInput();
+
+            // Validasi email jika ada
+            if (isset($data['email']) && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+                return $this->failValidationErrors('Format email tidak valid');
+            }
+
+            // Enkripsi password jika diberikan
+            if (isset($data['password'])) {
+                $data['password'] = password_hash($data['password'], PASSWORD_BCRYPT);
+            }
+
+            if ($this->model->update($id, $data)) {
+                return $this->respond(['message' => 'User berhasil diupdate']);
+            }
+
+            return $this->failServerError('Update gagal');
+        } catch (\Exception $e) {
+            return $this->failUnauthorized('Token tidak valid: ' . $e->getMessage());
+        }
     }
 
+    // ✅ Bug #17: Tambahkan validasi otorisasi delete
     public function delete($id = null)
     {
-        // Bug #17: No authorization check
-        if (!$this->model->find($id)) {
-            return $this->failNotFound('User not found');
+        $authHeader = $this->request->getHeaderLine('Authorization');
+        if (!$authHeader || !preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
+            return $this->failUnauthorized('Token tidak ditemukan');
         }
 
-        if ($this->model->delete($id)) {
-            return $this->respond([
-                'status' => 'success',
-                'message' => 'User deleted successfully'
-            ]);
-        }
+        $token = $matches[1];
 
-        return $this->failServerError('Delete failed');
+        try {
+            $decoded = $this->jwt->decode($token);
+
+            if ($decoded->user_id != $id) {
+                return $this->failForbidden('Tidak boleh menghapus user lain');
+            }
+
+            if (!$this->model->find($id)) {
+                return $this->failNotFound('User tidak ditemukan');
+            }
+
+            if ($this->model->delete($id)) {
+                return $this->respond(['message' => 'User berhasil dihapus']);
+            }
+
+            return $this->failServerError('Gagal menghapus user');
+        } catch (\Exception $e) {
+            return $this->failUnauthorized('Token tidak valid: ' . $e->getMessage());
+        }
     }
 }
